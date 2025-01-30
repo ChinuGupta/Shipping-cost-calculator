@@ -1,117 +1,73 @@
-import React, { useState, useEffect } from 'react';
-import { createClient } from 'contentful';
-import './App.css';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const contentful = require('contentful');
 
-const App = () => {
-  const [warehouses, setWarehouses] = useState([]);
-  const [origin, setOrigin] = useState('');
-  const [destination, setDestination] = useState('');
-  const [shippingOptions, setShippingOptions] = useState(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false); 
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-  const client = createClient({
-    space: 'y7wdat051ol0',
-    accessToken: 'wuLKc8OEuVm1VJe70nrzIAaNu71Bg9UV9XRQMkqkV_o',
+const client = contentful.createClient({
+  space: process.env.CONTENTFUL_SPACE_ID,
+  accessToken: process.env.CONTENTFUL_ACCESS_TOKEN,
+});
+
+async function getWarehouseEntryIdByName(warehouseName) {
+  const response = await client.getEntries({
+    content_type: 'warehouseModel',
+    'fields.name': warehouseName,
   });
 
-  useEffect(() => {
-    const fetchWarehouses = async () => {
-      try {
-        const response = await client.getEntries({
-          content_type: 'warehouseModel',
-        });
+  if (response.items.length > 0) {
+    return response.items[0].sys.id;
+  } else {
+    throw new Error(`Warehouse with name "${warehouseName}" not found.`);
+  }
+}
 
-        const warehouseNames = response.items.map(item => item.fields.name);
-        setWarehouses(warehouseNames);
-      } catch (err) {
-        setError('Error fetching warehouses.');
-      }
-    };
+async function getShippingRates(originCityId, destination) {
+  const response = await client.getEntries({
+    content_type: 'shippingRouteModel',
+    'fields.originCity.sys.id': originCityId,
+    'fields.destination': destination,
+  });
 
-    fetchWarehouses();
-  }, []);
+  return response.items.map(item => ({
+    source: item.fields.originCity?.fields?.name || 'Unknown',
+    sourceCity: item.fields.originCity?.fields?.city || 'Unknown City',
+    destination: item.fields.destination,
+    transport_mode: item.fields.transportMode || 'Unknown Mode',
+    cost: item.fields.cost,
+    time_hours: item.fields.timeHours,
+  }));
+}
 
-  // Handle form submission
-  const handleFormSubmit = async (e) => {
-    e.preventDefault();
-    setShippingOptions(null);
-    setError('');
-    setLoading(true); // Start loading
+function findBestShippingOptions(shippingData) {
+  if (shippingData.length === 0) return { message: 'No shipping options available' };
 
-    if (origin === destination) {
-      setError('Origin and Destination cannot be the same.');
-      setLoading(false); // Stop loading
-      return;
-    }
+  let cheapest = shippingData.reduce((a, b) => (a.cost < b.cost ? a : b));
+  let fastest = shippingData.reduce((a, b) => (a.time_hours < b.time_hours ? a : b));
+  let best = shippingData.find(entry =>
+    entry.cost <= cheapest.cost * 1.2 && entry.time_hours <= fastest.time_hours * 1.2
+  ) || cheapest;
 
-    try {
-      const response = await fetch(`http://localhost:3000/shipping?origin=${origin}&destination=${destination}`);
-      const data = await response.json();
+  return { best, cheapest, fastest };
+}
 
-      if (response.ok) {
-        setShippingOptions(data);
-      } else {
-        setError(data.error || 'An error occurred.');
-      }
-    } catch (err) {
-      setError('Error connecting to the server.');
-    }
+app.get('/shipping', async (req, res) => {
+  const { origin, destination } = req.query;
+  if (!origin || !destination) return res.status(400).json({ error: 'Origin and destination are required' });
 
-    setLoading(false); 
-  };
+  try {
+    const originCityId = await getWarehouseEntryIdByName(origin);
+    const rates = await getShippingRates(originCityId, destination);
+    const options = findBestShippingOptions(rates);
+    res.json(options);
+  } catch (error) {
+    console.error('Error fetching data from Contentful:', error);
+    res.status(500).json({ error: 'Error fetching data from Contentful', details: error.message });
+  }
+});
 
-  return (
-    <div className="app-container">
-      <h1>Shipping Calculator</h1>
-      <form onSubmit={handleFormSubmit} className="form-container">
-        <div className="form-group">
-          <label>Origin City: </label>
-          <select value={origin} onChange={(e) => setOrigin(e.target.value)} required>
-            <option value="">Select Origin</option>
-            {warehouses.map((warehouse, index) => (
-              <option key={index} value={warehouse}>
-                {warehouse}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="form-group">
-          <label>Destination City: </label>
-          <select value={destination} onChange={(e) => setDestination(e.target.value)} required>
-            <option value="">Select Destination</option>
-            {warehouses.map((warehouse, index) => (
-              <option key={index} value={warehouse}>
-                {warehouse}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <button type="submit" className="submit-btn" disabled={loading}>
-          {loading ? 'Fetching Shipping Routes...' : 'Get Shipping Routes'}
-        </button>
-      </form>
-
-      {error && <p className="error-message">{error}</p>}
-
-      {shippingOptions && (
-        <div className="result-container">
-          <h2>Shipping Options</h2>
-          <div className="option">
-            <strong>Cheapest:</strong> {shippingOptions.cheapest.transport_mode} ({shippingOptions.cheapest.cost} ₹, {shippingOptions.cheapest.time_hours} hours)
-          </div>
-          <div className="option">
-            <strong>Fastest:</strong> {shippingOptions.fastest.transport_mode} ({shippingOptions.fastest.cost} ₹, {shippingOptions.fastest.time_hours} hours)
-          </div>
-          <div className="option">
-            <strong>Best Option:</strong> {shippingOptions.best.transport_mode} (Cost: {shippingOptions.best.cost} ₹, Time: {shippingOptions.best.time_hours} hours)
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-export default App;
+const PORT = 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
